@@ -45,10 +45,10 @@ def main():
     # 3. Execution
     # Configurable via Environment Variables
     default_zettel = "/home/bhickta/development/upsc/Zettelkasten/DD Basu Polity"
-    default_processed = "/home/bhickta/development/upsc/Processed"
+    default_inbox = "/home/bhickta/development/upsc/Inbox"
     
     ZETTELKASTEN_DIR = os.getenv("ZETTELKASTEN_DIR", default_zettel)
-    PROCESSED_DIR = os.getenv("PROCESSED_DIR", default_processed)
+    PROCESSED_DIR = os.getenv("PROCESSED_DIR", default_inbox)
     
     # Step A: Build Index
     service.build_index(ZETTELKASTEN_DIR)

@@ -36,4 +36,5 @@ statistics.json
 errors.json
 
 # Archives (optional - uncomment if you don't want to track archives)
-# *_Archive/
+# Inbox_Archive/
+# Inbox_Test_Archive/

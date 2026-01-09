@@ -149,7 +149,7 @@ Rules:
         print(f"  [NEW] No match found. Importing.")
         # Logic to determine where to save it in Zettelkasten
         # Simplified: Just write to Zettelkasten/Imported/{subfolders}/{filename}
-        new_path = source.path.replace("Processed", "Zettelkasten/Imported")
+        new_path = source.path.replace("Inbox", "Zettelkasten/Imported")
         new_note = Note(path=new_path, content=source.content)
         self.repo.write_note(new_note)
         self.repo.archive_note(source.path)
