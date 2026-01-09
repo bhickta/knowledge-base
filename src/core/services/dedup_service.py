@@ -1,5 +1,6 @@
 from typing import List, Tuple
 import numpy as np
+from tqdm import tqdm
 from src.core.interfaces.ports import ILLMProvider, IEmbeddingProvider, INoteRepository
 from src.core.domain.note import Note
 
@@ -21,7 +22,7 @@ class DeduplicationService:
         """Scans the target directory and executes embeddings for all notes."""
         print(f"Building index from {target_directory}...")
         paths = self.repo.list_notes(target_directory)
-        for path in paths:
+        for path in tqdm(paths, desc="Indexing Zettelkasten"):
             try:
                 note = self.repo.read_note(path)
                 embedding = self.embedder.embed(note.content)
@@ -53,8 +54,8 @@ class DeduplicationService:
         """Main workflow: Iterate source, find match, merge/copy."""
         source_paths = self.repo.list_notes(source_directory)
         
-        for path in source_paths:
-            print(f"Processing candidate: {path}")
+        for path in tqdm(source_paths, desc="Processing New Notes"):
+            # print(f"Processing candidate: {path}") # tqdm handles logging better
             # try:
             source_note = self.repo.read_note(path)
             source_emb = self.embedder.embed(source_note.content)

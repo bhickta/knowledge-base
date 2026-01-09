@@ -1,5 +1,9 @@
 import sys
 import os
+from dotenv import load_dotenv
+
+# Load environment variables from .env file
+load_dotenv()
 
 # Ensure knowledge_agent is in path
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
@@ -39,9 +43,12 @@ def main():
     )
     
     # 3. Execution
-    # TODO: Make these configurable via CLI args
-    ZETTELKASTEN_DIR = "/home/bhickta/development/upsc/Zettelkasten"
-    PROCESSED_DIR = "/home/bhickta/development/upsc/Processed"
+    # Configurable via Environment Variables
+    default_zettel = "/home/bhickta/development/upsc/Zettelkasten/DD Basu Polity"
+    default_processed = "/home/bhickta/development/upsc/Processed"
+    
+    ZETTELKASTEN_DIR = os.getenv("ZETTELKASTEN_DIR", default_zettel)
+    PROCESSED_DIR = os.getenv("PROCESSED_DIR", default_processed)
     
     # Step A: Build Index
     service.build_index(ZETTELKASTEN_DIR)
