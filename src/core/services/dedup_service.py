@@ -1,5 +1,7 @@
 from typing import List, Tuple
 import numpy as np
+import pickle
+import os
 from tqdm import tqdm
 from src.core.interfaces.ports import ILLMProvider, IEmbeddingProvider, INoteRepository
 from src.core.domain.note import Note
@@ -10,16 +12,45 @@ class DeduplicationService:
         llm: ILLMProvider,
         embedder: IEmbeddingProvider,
         repo: INoteRepository,
-        threshold: float = 0.85
+        threshold: float = 0.60,
+        cache_path: str = "index.pkl"
     ):
         self.llm = llm
         self.embedder = embedder
         self.repo = repo
         self.threshold = threshold
+        self.cache_path = cache_path
         self.index: List[Tuple[Note, List[float]]] = []
+
+    def _save_index(self):
+        """Persist the current index to disk."""
+        try:
+            with open(self.cache_path, 'wb') as f:
+                pickle.dump(self.index, f)
+            print(f"Index cache saved to {os.path.abspath(self.cache_path)}")
+        except Exception as e:
+            print(f"Failed to save index cache: {e}")
+
+    def _load_index(self) -> bool:
+        """Try to load index from disk. Returns True if successful."""
+        if os.path.exists(self.cache_path):
+            try:
+                print(f"Loading cached index from {self.cache_path}...")
+                with open(self.cache_path, 'rb') as f:
+                    self.index = pickle.load(f)
+                print(f"Loaded {len(self.index)} notes from cache.")
+                return True
+            except Exception as e:
+                print(f"Failed to load cache: {e}")
+        else:
+            print(f"No cache found at {os.path.abspath(self.cache_path)}")
+        return False
 
     def build_index(self, target_directory: str):
         """Scans the target directory and executes embeddings for all notes."""
+        if self._load_index():
+            return
+
         print(f"Building index from {target_directory}...")
         paths = self.repo.list_notes(target_directory)
         for path in tqdm(paths, desc="Indexing Zettelkasten"):
@@ -28,7 +59,9 @@ class DeduplicationService:
                 embedding = self.embedder.embed(note.content)
                 self.index.append((note, embedding))
             except Exception as e:
-                print(f"Failed to index {path}: {e}")
+                print(f"Error indexing {path}: {e}")
+        
+        self._save_index()
         print(f"Index built with {len(self.index)} notes.")
 
     def find_best_match(self, source_embedding: List[float]) -> Tuple[Note, float]:
@@ -62,6 +95,9 @@ class DeduplicationService:
             
             match_note, score = self.find_best_match(source_emb)
             
+            if match_note:
+                print(f"  Best candidate: {os.path.basename(match_note.path)} (Score: {score:.4f})")
+            
             if match_note and score >= self.threshold:
                 self._merge_notes(source_note, match_note, score)
             else:
@@ -72,17 +108,19 @@ class DeduplicationService:
     def _merge_notes(self, source: Note, target: Note, score: float):
         print(f"  [MERGE] Found match ({score:.2f}) -> {target.path}")
         prompt = f"""
-You are an expert knowledge curator. Merge the following two notes into a single, comprehensive Master Note.
-Rules:
-1. Preserve ALL unique facts, dates, names, and specific details from both.
-2. If conflicts exist, note them explicitly.
-3. Use a clear, structured Markdown format.
-4. Do NOT output any conversational text, just the Markdown content.
+You are an expert knowledge curator updating an existing note.
+Your goal is to incorporate new information from "NOTE 2" into "NOTE 1" with MINIMAL changes to the existing text of NOTE 1.
 
---- NOTE 1 (Existing) ---
+Rules:
+1. **LOSSLESS**: Do not delete any information from NOTE 1.
+2. **MINIMAL DIFF**: Keep the structure, headings, and wording of NOTE 1 exactly as is, unless you are correcting a factual error.
+3. **INSERTION**: Insert the new facts from NOTE 2 into the appropriate sections of NOTE 1. If no section fits, append a new section.
+4. **FORMAT**: Output the final unified Markdown content. Do not output conversational text.
+
+--- NOTE 1 (Base Note - Keep Structure) ---
 {target.content}
 
---- NOTE 2 (New) ---
+--- NOTE 2 (New Info - Extract & Insert) ---
 {source.content}
 
 --- MERGED NOTE ---
@@ -103,6 +141,9 @@ Rules:
             if n.path == target.path:
                 self.index[i] = (target, new_embedding)
                 break
+        
+        # Persist changes
+        self._save_index()
 
     def _copy_note(self, source: Note):
         print(f"  [NEW] No match found. Importing.")
@@ -116,3 +157,6 @@ Rules:
         # Live Index Update: Add new note to index
         new_embedding = self.embedder.embed(new_note.content)
         self.index.append((new_note, new_embedding))
+        
+        # Persist changes
+        self._save_index()

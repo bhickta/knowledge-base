@@ -24,3 +24,16 @@ pip-delete-this-directory.txt
 
 # Mac
 .DS_Store
+
+# Knowledge Agent Cache & Generated Files
+*.pkl
+index.pkl
+*.log
+logs/
+merge_report.html
+merge_log.json
+statistics.json
+errors.json
+
+# Archives (optional - uncomment if you don't want to track archives)
+# *_Archive/
