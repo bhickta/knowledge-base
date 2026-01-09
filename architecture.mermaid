@@ -1,0 +1,36 @@
+mermaid
+sequenceDiagram
+    participant User
+    participant DeduplicationService
+    participant EmbeddingModel (Local)
+    participant Gemini Flash (Cloud)
+    participant FileSystem
+
+    User->>DeduplicationService: Start process
+    DeduplicationService->>FileSystem: Scan Zettelkasten
+    FileSystem-->>DeduplicationService: Returns 1,000 files
+    
+    loop For each Zettel
+        DeduplicationService->>EmbeddingModel (Local): Embed(text)
+        EmbeddingModel (Local)-->>DeduplicationService: Vector [0.1, 0.5...]
+    end
+    note right of DeduplicationService: Index Built (100% Private, Free)
+
+    DeduplicationService->>FileSystem: Scan Processed (New Notes)
+    
+    loop For each New Note
+        DeduplicationService->>EmbeddingModel (Local): Embed(new_text)
+        DeduplicationService->>DeduplicationService: Search Index (Cosine Similarity)
+        
+        alt Match Found (> 0.85)
+            DeduplicationService->>Gemini Flash (Cloud): Prompt: "Merge Note A and Note B..."
+            Gemini Flash (Cloud)-->>DeduplicationService: Merged Content (Markdown)
+            DeduplicationService->>FileSystem: Save Merged Note
+            DeduplicationService->>EmbeddingModel (Local): Re-embed Merged Content
+            DeduplicationService->>DeduplicationService: Update Index
+        else No Match
+            DeduplicationService->>FileSystem: Copy File
+            DeduplicationService->>EmbeddingModel (Local): Embed New File
+            DeduplicationService->>DeduplicationService: Add to Index
+        end
+    end

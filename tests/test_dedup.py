@@ -30,8 +30,9 @@ class TestDeduplicationService(unittest.TestCase):
         
         # Mock Embeddings (High similarity)
         self.mock_embedder.embed.side_effect = [
-            [1.0, 0.0], # Target
-            [0.9, 0.1]  # Source (Very close)
+            [1.0, 0.0], # Target (Build Index)
+            [0.9, 0.1], # Source (Search)
+            [1.0, 0.0]  # Re-embed Merged Result (Live Update)
         ]
         
         # Execution
@@ -56,12 +57,15 @@ class TestDeduplicationService(unittest.TestCase):
         
         # Mock Embeddings (Low similarity)
         self.mock_embedder.embed.side_effect = [
-            [1.0, 0.0], 
-            [0.0, 1.0] # Orthogonal
+            [1.0, 0.0], # Target (Build Index)
+            [0.0, 1.0], # Source (Search)
+            [0.0, 1.0]  # Re-embed New Note (Live Update)
         ]
         
         # Execution
         self.service.build_index("zettel")
+        # Index starts with 1 item
+        self.assertEqual(len(self.service.index), 1)
         self.service.process_directory("processed")
         
         # Verify
@@ -71,6 +75,9 @@ class TestDeduplicationService(unittest.TestCase):
         args, _ = self.mock_repo.write_note.call_args
         # Should have "Imported" in the path now that "Processed" was correctly capitalized in source
         self.assertIn("Imported", args[0].path)
+        
+        # Live Indexing Verification: Index should now have 2 items (Target + New Source)
+        self.assertEqual(len(self.service.index), 2)
 
 if __name__ == '__main__':
     unittest.main()

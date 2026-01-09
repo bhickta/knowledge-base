@@ -55,18 +55,18 @@ class DeduplicationService:
         
         for path in source_paths:
             print(f"Processing candidate: {path}")
-            try:
-                source_note = self.repo.read_note(path)
-                source_emb = self.embedder.embed(source_note.content)
-                
-                match_note, score = self.find_best_match(source_emb)
-                
-                if match_note and score >= self.threshold:
-                    self._merge_notes(source_note, match_note, score)
-                else:
-                    self._copy_note(source_note)
-            except Exception as e:
-                print(f"Error processing {path}: {e}")
+            # try:
+            source_note = self.repo.read_note(path)
+            source_emb = self.embedder.embed(source_note.content)
+            
+            match_note, score = self.find_best_match(source_emb)
+            
+            if match_note and score >= self.threshold:
+                self._merge_notes(source_note, match_note, score)
+            else:
+                self._copy_note(source_note)
+            # except Exception as e:
+            #     print(f"Error processing {path}: {e}")
 
     def _merge_notes(self, source: Note, target: Note, score: float):
         print(f"  [MERGE] Found match ({score:.2f}) -> {target.path}")
@@ -91,35 +91,27 @@ Rules:
         # Update Target
         target.content = merged_content
         self.repo.write_note(target)
-        
-        # Archive Source? Or just leave it?
-        # User said "merge new notes into those". Usually implies consuming the source.
-        # Implementation plan said "mark originals for archiving".
         self.repo.archive_note(source.path)
+        
+        # Live Index Update: Re-embed the updated target note
+        new_embedding = self.embedder.embed(target.content)
+        
+        # Find and replace the old entry in the index
+        # We search by path, assuming path is unique key
+        for i, (n, _) in enumerate(self.index):
+            if n.path == target.path:
+                self.index[i] = (target, new_embedding)
+                break
 
     def _copy_note(self, source: Note):
         print(f"  [NEW] No match found. Importing.")
         # Logic to determine where to save it in Zettelkasten
-        # For simplicity, we might just copy it to root or a 'New_Arrivals' folder
-        # or recreate the subfolder structure.
-        
-        # Let's map Processed structure to Zettelkasten structure if possible
-        # For now, just a direct copy to a 'Imported' folder to be safe
-        import os
-        base_name = os.path.basename(source.path)
-        # Ideally, we inject the Zettelkasten root path here. 
-        # But the Note object tracks its own path. 
-        # We need to change the path.
-        
-        # HACK: Getting Zettelkasten root from the first indexed item or config?
-        # Let's assume the repo handles relative paths or we pass a root.
-        # Better: Implementation Plan said "copy Source file to Zettelkasten".
-        
-        # We will assume Zettelkasten root is available or passed in context.
-        # For this execution, let's hardcode the logic to move it to a synced processed folder.
-        
         # Simplified: Just write to Zettelkasten/Imported/{subfolders}/{filename}
         new_path = source.path.replace("Processed", "Zettelkasten/Imported")
         new_note = Note(path=new_path, content=source.content)
         self.repo.write_note(new_note)
         self.repo.archive_note(source.path)
+        
+        # Live Index Update: Add new note to index
+        new_embedding = self.embedder.embed(new_note.content)
+        self.index.append((new_note, new_embedding))

@@ -5,6 +5,7 @@ import os
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
 from src.infrastructure.llm.ollama_provider import OllamaGemmaProvider
+from src.infrastructure.llm.gemini_provider import GeminiFlashProvider
 from src.infrastructure.embedding.local_embedder import LocalEmbeddingProvider
 from src.infrastructure.storage.fs_repo import MarkdownFileRepository
 from src.core.services.dedup_service import DeduplicationService
@@ -13,8 +14,15 @@ def main():
     print("Initializing Knowledge Agent...")
     
     # 1. Setup Infrastructure
-    # Check if Ollama is running? We assume yes or Provider handles error.
-    llm = OllamaGemmaProvider(model_name="gemma3:12b")
+    # Choose Provider based on Config
+    provider_type = os.getenv("LLM_PROVIDER", "ollama").lower()
+    
+    if provider_type == "gemini":
+        print("Using Cloud Provider: Gemini 1.5 Flash")
+        llm = GeminiFlashProvider() # Requires GEMINI_API_KEY env var
+    else:
+        print("Using Local Provider: Ollama (Gemma 3)")
+        llm = OllamaGemmaProvider(model_name="gemma3:12b")
     
     # Check if BGE-M3 is ready
     print("Loading Embedding Model (BAAI/bge-m3)...")
