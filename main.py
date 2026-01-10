@@ -39,7 +39,7 @@ def main():
         llm=llm,
         embedder=embedder,
         repo=repo,
-        threshold=0.85
+        threshold=0.65
     )
     
     # 3. Execution
