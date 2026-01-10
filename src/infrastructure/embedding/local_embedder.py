@@ -4,8 +4,7 @@ from src.core.interfaces.ports import IEmbeddingProvider
 
 class LocalEmbeddingProvider(IEmbeddingProvider):
     def __init__(self, model_name: str = "BAAI/bge-m3"):
-        # Force CPU to avoid conflict with Ollama/VRAM limits
-        self.model = SentenceTransformer(model_name, device="cpu")
+        self.model = SentenceTransformer(model_name, device="cuda")
     
     def embed(self, text: str) -> List[float]:
         # BGE-M3 returns numpy array, convert to list
