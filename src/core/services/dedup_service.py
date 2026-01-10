@@ -100,22 +100,127 @@ class DeduplicationService:
         if to_import:
             print(f"Importing {len(to_import)} new notes...")
             for note in tqdm(to_import, desc="Importing"):
-                self._copy_note(note)
+                self._import_note(note)
 
-        # B. Handle Merges (Batched)
+        # B. Handle Merges and Links (Batched by Target)
         total_batches = len(merge_plan)
         if total_batches > 0:
-            print(f"Executing {total_batches} merge batches (saving API calls)...")
+            print(f"Analyzing {total_batches} potential merge/link batches...")
             
-            for target_path, data in tqdm(merge_plan.items(), desc="Merging Batches"):
+            for target_path, data in tqdm(merge_plan.items(), desc="Processing Batches"):
                 target = data["target"]
-                sources = [s[0] for s in data["sources"]] # Extract note objects
                 
-                self._batch_merge_notes(target, sources)
+                # Split sources into 'Must Merge' vs 'Classify'
+                must_merge = []
+                to_verify = []
                 
-                # Rate Limiting: Sleep to respect 15 RPM.
-                # User requested 20to be strictly safe.
-                time.sleep(20) 
+                for src, score in data["sources"]:
+                    if score >= 0.88: # High Confidence -> Auto Merge
+                        must_merge.append(src)
+                    elif score >= 0.70: # Medium Confidence -> Ask LLM
+                        to_verify.append(src)
+                    else:
+                        self._import_note(src)
+                
+                # Handle Must Merges (Auto)
+                if must_merge:
+                    self._batch_merge_notes(target, must_merge)
+                    time.sleep(2)
+                
+                # Handle Verification (Merge vs Link)
+                for src in to_verify:
+                    decision = self._classify_match(src, target)
+                    if decision == "MERGE":
+                        self._batch_merge_notes(target, [src])
+                        time.sleep(2)
+                    else:
+                        print(f"  [LINK] '{os.path.basename(src.path)}' -> '{os.path.basename(target.path)}'")
+                        self._link_note(src, target)
+
+    def _classify_match(self, source: Note, target: Note) -> str:
+        """Asks LLM if two notes are the SAME concept (Merge) or just RELATED (Link)."""
+        prompt = f"""
+Compare these two study notes:
+
+NOTE A:
+{target.content[:500]}...
+
+NOTE B:
+{source.content[:500]}...
+
+Are these two notes describing the EXACT SAME atomic concept, or are they different sub-topics that are just related?
+Examples:
+- "Veto Power" and "Types of Veto" -> MERGE (Same topic)
+- "Veto Power" and "Presidential Appointments" -> LINK (Related under President, but distinct sub-topics)
+
+Respond with exactly one word: MERGE or LINK.
+Decision:"""
+        try:
+            response = self.llm.generate(prompt).strip().upper()
+            return "MERGE" if "MERGE" in response else "LINK"
+        except Exception as e:
+            print(f"Classification failed: {e}")
+            return "LINK"
+
+    def _link_note(self, source: Note, target: Note):
+        """Creates the source note as new but adds bidirectional links."""
+        base_name = os.path.basename(source.path)
+        new_path = os.path.join(os.path.dirname(target.path), base_name)
+        
+        if os.path.exists(new_path):
+             new_path = new_path.replace(".md", "_1.md")
+
+        # Names for links
+        source_name = os.path.splitext(os.path.basename(new_path))[0]
+        target_name = os.path.splitext(os.path.basename(target.path))[0]
+
+        # 1. Update Source with link to Target
+        source.content = self._append_related_link(source.content, target_name)
+        new_note = Note(path=new_path, content=source.content)
+        self.repo.write_note(new_note)
+        self.repo.archive_note(source.path)
+        
+        # 2. Update Target with link to Source
+        target.content = self._append_related_link(target.content, source_name)
+        self.repo.write_note(target)
+        
+        # Live Index Updates
+        for n in [new_note, target]:
+            emb = self.embedder.embed(n.content)
+            self.index_store.upsert_note(n.path, n.content, emb, time.time())
+
+    def _append_related_link(self, content: str, link_name: str) -> str:
+        """Helper to append a WikiLink to a consolidated 'Related' section."""
+        import re
+        
+        # Find existing Related section
+        pattern = re.compile(r"\n\n---\n\*\*Related:\*\*\s*(.*)$", re.MULTILINE)
+        match = pattern.search(content)
+        
+        existing_links = set()
+        clean_content = content
+        
+        if match:
+            raw_links = match.group(1)
+            links = re.findall(r"\[\[(.*?)\]\]", raw_links)
+            existing_links.update(links)
+            clean_content = pattern.sub("", content)
+        
+        existing_links.add(link_name)
+        sorted_links = sorted(list(existing_links))
+        links_str = ", ".join([f"[[{name}]]" for name in sorted_links])
+        
+        return clean_content.rstrip() + f"\n\n---\n**Related:** {links_str}"
+
+    def _import_note(self, source: Note):
+        """Imports a completely new note."""
+        new_path = source.path.replace("Inbox", "Zettelkasten/Imported")
+        new_note = Note(path=new_path, content=source.content)
+        self.repo.write_note(new_note)
+        self.repo.archive_note(source.path)
+        
+        new_embedding = self.embedder.embed(new_note.content)
+        self.index_store.upsert_note(new_note.path, new_note.content, new_embedding, time.time())
 
     def _batch_merge_notes(self, target: Note, sources: List[Note]):
         """Merges multiple source notes into one target note in a single LLM call."""
@@ -148,61 +253,71 @@ Rules:
         try:
             merged_content = self.llm.generate(prompt)
             
-            # --- Footer Deduplication Logic ---
+            # --- Metadata & Footer Management ---
             import re
             
-            # 1. Gather all existing sources from the content (if any)
-            # Pattern: **Merged Sources:** [[Link1]], [[Link2]]...
-            existing_links = set()
+            # 1. Update Source Metadata (YAML)
+            yaml_pattern = re.compile(r"^---\n(.*?)\n---", re.DOTALL)
+            yaml_match = yaml_pattern.search(merged_content)
             
-            # Regex to find the footer line
+            if yaml_match:
+                yaml_content = yaml_match.group(1)
+                source_field_pattern = re.compile(r"^Source:\s*(.*)$", re.MULTILINE)
+                source_match = source_field_pattern.search(yaml_content)
+                
+                # Get current sources from fragment YAML
+                new_sources = set()
+                for src in sources:
+                    src_yaml_match = yaml_pattern.search(src.content)
+                    if src_yaml_match:
+                        src_s_match = source_field_pattern.search(src_yaml_match.group(1))
+                        if src_s_match:
+                            new_sources.add(src_s_match.group(1).strip())
+
+                if source_match:
+                    current_source_val = source_match.group(1).strip()
+                    sources_list = [s.strip() for s in re.split(r",|;", current_source_val)]
+                    existing_sources = set(sources_list)
+                    existing_sources.update(new_sources)
+                    
+                    new_source_str = ", ".join(sorted(list(existing_sources)))
+                    
+                    # Safe replacement using span to avoid re.sub escape issues
+                    s_start, s_end = source_match.span()
+                    new_yaml_content = yaml_content[:s_start] + f"Source: {new_source_str}" + yaml_content[s_end:]
+                    
+                    # Update merged_content with high-confidence slice replacement
+                    y_start, y_end = yaml_match.span()
+                    merged_content = merged_content[:y_start] + f"---\n{new_yaml_content}\n---" + merged_content[y_end:]
+
+            # 2. Footers: Merged Sources [[WikiLinks]]
+            existing_links = set()
             footer_pattern = re.compile(r"\n\n---\n\*\*Merged Sources:\*\*\s*(.*)$", re.MULTILINE)
-            match = footer_pattern.search(merged_content)
+            footer_match = footer_pattern.search(merged_content)
             
             clean_content = merged_content
-            if match:
-                raw_links = match.group(1)
-                # specific links [[Name]]
+            if footer_match:
+                raw_links = footer_match.group(1)
                 links = re.findall(r"\[\[(.*?)\]\]", raw_links)
                 existing_links.update(links)
-                # Remove the old footer so we can append the fresh one
+                # Empty replacement is safe from escape errors
                 clean_content = footer_pattern.sub("", merged_content)
 
-            # 2. Add NEW sources
             existing_links.update(source_names)
-            
-            # 3. Construct New Footer
             sorted_links = sorted(list(existing_links))
             links_str = ", ".join([f"[[{name}]]" for name in sorted_links])
             final_footer = f"\n\n---\n**Merged Sources:** {links_str}"
             
-            # 4. Append
             final_content = clean_content.rstrip() + final_footer
             
-            # Update Target
             target.content = final_content
             self.repo.write_note(target)
             
-            # Archive All Sources
             for src in sources:
                 self.repo.archive_note(src.path)
             
-            # Live Index Update
             new_embedding = self.embedder.embed(target.content)
-            mtime = time.time()
-            self.index_store.upsert_note(target.path, target.content, new_embedding, mtime)
+            self.index_store.upsert_note(target.path, target.content, new_embedding, time.time())
             
         except Exception as e:
             print(f"Batch merge failed for {target.path}: {e}")
-
-    def _copy_note(self, source: Note):
-        # print(f"  [NEW] No match found. Importing.") # Reduce spam
-        # Logic to determine where to save it in Zettelkasten
-        new_path = source.path.replace("Inbox", "Zettelkasten/Imported")
-        new_note = Note(path=new_path, content=source.content)
-        self.repo.write_note(new_note)
-        self.repo.archive_note(source.path)
-        
-        # Live Index Update
-        new_embedding = self.embedder.embed(new_note.content)
-        self.index_store.upsert_note(new_note.path, new_note.content, new_embedding, time.time())
