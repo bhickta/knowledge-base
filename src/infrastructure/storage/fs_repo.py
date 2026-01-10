@@ -33,17 +33,21 @@ class MarkdownFileRepository(INoteRepository):
         if not os.path.exists(path):
             return
             
-        # Try to locate project root (assuming Inbox is in .../upsc/Inbox)
-        # If path is /home/user/upsc/Inbox/file.md
-        # Dirname: /home/user/upsc/Inbox
-        # Parent: /home/user/upsc
-        
-        parent_dir = os.path.dirname(os.path.dirname(path))
-        archive_dir = os.path.join(parent_dir, "Processed_Archive")
-        
+        # Robustly move out of Inbox
+        # We assume the path contains "Inbox"
+        if "Inbox" in path:
+            # Split at "Inbox"
+            # /path/to/upsc/Inbox/Sub/file.md -> /path/to/upsc/
+            base_root = path.split("Inbox")[0]
+            archive_root = os.path.join(base_root, "Processed_Archive")
+        else:
+            # Fallback for weird paths
+            archive_root = os.path.join(os.path.dirname(os.path.dirname(path)), "Processed_Archive")
+
+        # Preserve filename
         filename = os.path.basename(path)
-        dest = os.path.join(archive_dir, filename)
+        dest = os.path.join(archive_root, filename)
         
         print(f"Archiving to {dest}")
-        os.makedirs(archive_dir, exist_ok=True)
+        os.makedirs(archive_root, exist_ok=True)
         shutil.move(path, dest)

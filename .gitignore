@@ -38,3 +38,6 @@ errors.json
 # Archives (optional - uncomment if you don't want to track archives)
 # Inbox_Archive/
 # Inbox_Test_Archive/
+
+# Chroma
+chroma_db
