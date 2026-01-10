@@ -22,8 +22,9 @@ def main():
     provider_type = os.getenv("LLM_PROVIDER", "ollama").lower()
     
     if provider_type == "gemini":
-        print("Using Cloud Provider: Gemini 1.5 Flash")
-        llm = GeminiFlashProvider() # Requires GEMINI_API_KEY env var
+        model_name = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
+        print(f"Using Cloud Provider: {model_name}")
+        llm = GeminiFlashProvider(model_name=model_name) # Requires GEMINI_API_KEY env var
     else:
         print("Using Local Provider: Ollama (Gemma 3)")
         llm = OllamaGemmaProvider(model_name="gemma3:12b")

@@ -113,9 +113,9 @@ class DeduplicationService:
                 
                 self._batch_merge_notes(target, sources)
                 
-                # Rate Limiting: Sleep to respect 15 RPM (approx 4s per call)
-                # We can be slightly faster if batches are large, but safety first.
-                time.sleep(2) 
+                # Rate Limiting: Sleep to respect 15 RPM.
+                # User requested 20to be strictly safe.
+                time.sleep(20) 
 
     def _batch_merge_notes(self, target: Note, sources: List[Note]):
         """Merges multiple source notes into one target note in a single LLM call."""
@@ -148,12 +148,39 @@ Rules:
         try:
             merged_content = self.llm.generate(prompt)
             
-            # Append source links
-            links = ", ".join([f"[[{name}]]" for name in source_names])
-            merged_content += f"\n\n---\n**Merged Sources:** {links}"
+            # --- Footer Deduplication Logic ---
+            import re
+            
+            # 1. Gather all existing sources from the content (if any)
+            # Pattern: **Merged Sources:** [[Link1]], [[Link2]]...
+            existing_links = set()
+            
+            # Regex to find the footer line
+            footer_pattern = re.compile(r"\n\n---\n\*\*Merged Sources:\*\*\s*(.*)$", re.MULTILINE)
+            match = footer_pattern.search(merged_content)
+            
+            clean_content = merged_content
+            if match:
+                raw_links = match.group(1)
+                # specific links [[Name]]
+                links = re.findall(r"\[\[(.*?)\]\]", raw_links)
+                existing_links.update(links)
+                # Remove the old footer so we can append the fresh one
+                clean_content = footer_pattern.sub("", merged_content)
+
+            # 2. Add NEW sources
+            existing_links.update(source_names)
+            
+            # 3. Construct New Footer
+            sorted_links = sorted(list(existing_links))
+            links_str = ", ".join([f"[[{name}]]" for name in sorted_links])
+            final_footer = f"\n\n---\n**Merged Sources:** {links_str}"
+            
+            # 4. Append
+            final_content = clean_content.rstrip() + final_footer
             
             # Update Target
-            target.content = merged_content
+            target.content = final_content
             self.repo.write_note(target)
             
             # Archive All Sources
