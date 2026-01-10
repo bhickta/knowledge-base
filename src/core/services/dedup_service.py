@@ -1,11 +1,10 @@
 from typing import List, Tuple
-import numpy as np
 import os
 import time
 from tqdm import tqdm
 from src.core.interfaces.ports import ILLMProvider, IEmbeddingProvider, INoteRepository
 from src.core.domain.note import Note
-from src.infrastructure.storage.sqlite_index import SQLiteIndexRepository
+from src.infrastructure.storage.chroma_store import ChromaStore
 
 class DeduplicationService:
     def __init__(
@@ -14,22 +13,13 @@ class DeduplicationService:
         embedder: IEmbeddingProvider,
         repo: INoteRepository,
         threshold: float = 0.60,
-        db_path: str = "knowledge_index.db"
+        db_path: str = "chroma_db"
     ):
         self.llm = llm
         self.embedder = embedder
         self.repo = repo
         self.threshold = threshold
-        self.index_repo = SQLiteIndexRepository(db_path)
-        
-        # Load index into memory for fast searching
-        self.in_memory_index: List[Tuple[str, List[float]]] = [] 
-        self._refresh_memory_index()
-
-    def _refresh_memory_index(self):
-        """Loads all embeddings from DB into memory."""
-        self.in_memory_index = self.index_repo.get_all_embeddings()
-        print(f"Loaded {len(self.in_memory_index)} notes into memory index.")
+        self.index_store = ChromaStore(persist_path=db_path)
 
     def build_index(self, target_directory: str):
         """Incrementally scans the target directory and updates embeddings."""
@@ -41,44 +31,34 @@ class DeduplicationService:
             try:
                 # Check timestamps
                 mtime = os.path.getmtime(path)
-                cached_mtime = self.index_repo.get_last_modified(path)
+                cached_mtime = self.index_store.get_last_modified(path)
                 
                 if cached_mtime is None or mtime > cached_mtime:
                     # New or Modified
                     note = self.repo.read_note(path)
                     embedding = self.embedder.embed(note.content)
-                    self.index_repo.upsert_note(note, embedding, mtime)
+                    self.index_store.upsert_note(path, note.content, embedding, mtime)
                     updates += 1
             except Exception as e:
                 print(f"Error indexing {path}: {e}")
         
         if updates > 0:
             print(f"Updated index with {updates} changes.")
-            self._refresh_memory_index()
         else:
             print("Index is up to date.")
+        
+        print(f"Total notes in index: {self.index_store.count()}")
 
     def find_best_match(self, source_embedding: List[float]) -> Tuple[Note, float]:
-        """Finds the closest note in the index using Cosine Similarity."""
-        if not self.in_memory_index:
+        """Finds the closest note in the index using ChromaDB."""
+        candidates = self.index_store.query_similar(source_embedding, top_k=1)
+        
+        if not candidates:
             return None, 0.0
 
-        target_embeddings = np.array([item[1] for item in self.in_memory_index])
-        source_vec = np.array(source_embedding)
-        
-        # Cosine Similarity
-        scores = np.dot(target_embeddings, source_vec)
-        best_idx = np.argmax(scores)
-        best_score = scores[best_idx]
-        
-        best_path = self.in_memory_index[best_idx][0]
-        # We need to load the actual note content to return a Note object
-        # Since Note object is not stored fully in DB (only content hash?), 
-        # we read from FS.
-        # Although our 'process_directory' needs the note content for merging.
-        best_note = self.repo.read_note(best_path)
-        
-        return best_note, float(best_score)
+        path, score, content = candidates[0]
+        # We can construct a Note from the result
+        return Note(path=path, content=content), score
 
     def process_directory(self, source_directory: str):
         """Main workflow: Iterate source, find match, merge/copy."""
@@ -137,15 +117,9 @@ Rules:
             
             # Live Index Update
             new_embedding = self.embedder.embed(target.content)
-            mtime = time.time() # Approximation, or read from fs
-            self.index_repo.upsert_note(target, new_embedding, mtime)
+            mtime = time.time()
+            self.index_store.upsert_note(target.path, target.content, new_embedding, mtime)
             
-            # Refresh memory (Partial update optimization possible, but full refresh safer for now or just patch memory)
-            # Patching memory for speed:
-            for i, (p, _) in enumerate(self.in_memory_index):
-                if p == target.path:
-                    self.in_memory_index[i] = (target.path, new_embedding)
-                    break
         except Exception as e:
             print(f"Merge failed: {e}")
 
@@ -159,5 +133,4 @@ Rules:
         
         # Live Index Update
         new_embedding = self.embedder.embed(new_note.content)
-        self.index_repo.upsert_note(new_note, new_embedding, time.time())
-        self.in_memory_index.append((new_path, new_embedding))
+        self.index_store.upsert_note(new_note.path, new_note.content, new_embedding, time.time())
