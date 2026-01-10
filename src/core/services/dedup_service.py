@@ -127,6 +127,10 @@ Rules:
 """
         merged_content = self.llm.generate(prompt)
         
+        # Append source link for traceability
+        source_name = os.path.splitext(os.path.basename(source.path))[0]
+        merged_content += f"\n\n---\n**Merged Source:** [[{source_name}]]"
+        
         # Update Target
         target.content = merged_content
         self.repo.write_note(target)
