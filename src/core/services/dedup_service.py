@@ -1,10 +1,11 @@
 from typing import List, Tuple
 import numpy as np
-import pickle
 import os
+import time
 from tqdm import tqdm
 from src.core.interfaces.ports import ILLMProvider, IEmbeddingProvider, INoteRepository
 from src.core.domain.note import Note
+from src.infrastructure.storage.sqlite_index import SQLiteIndexRepository
 
 class DeduplicationService:
     def __init__(
@@ -13,97 +14,92 @@ class DeduplicationService:
         embedder: IEmbeddingProvider,
         repo: INoteRepository,
         threshold: float = 0.60,
-        cache_path: str = "index.pkl"
+        db_path: str = "knowledge_index.db"
     ):
         self.llm = llm
         self.embedder = embedder
         self.repo = repo
         self.threshold = threshold
-        self.cache_path = cache_path
-        self.index: List[Tuple[Note, List[float]]] = []
+        self.index_repo = SQLiteIndexRepository(db_path)
+        
+        # Load index into memory for fast searching
+        self.in_memory_index: List[Tuple[str, List[float]]] = [] 
+        self._refresh_memory_index()
 
-    def _save_index(self):
-        """Persist the current index to disk."""
-        try:
-            with open(self.cache_path, 'wb') as f:
-                pickle.dump(self.index, f)
-            print(f"Index cache saved to {os.path.abspath(self.cache_path)}")
-        except Exception as e:
-            print(f"Failed to save index cache: {e}")
-
-    def _load_index(self) -> bool:
-        """Try to load index from disk. Returns True if successful."""
-        if os.path.exists(self.cache_path):
-            try:
-                print(f"Loading cached index from {self.cache_path}...")
-                with open(self.cache_path, 'rb') as f:
-                    self.index = pickle.load(f)
-                print(f"Loaded {len(self.index)} notes from cache.")
-                return True
-            except Exception as e:
-                print(f"Failed to load cache: {e}")
-        else:
-            print(f"No cache found at {os.path.abspath(self.cache_path)}")
-        return False
+    def _refresh_memory_index(self):
+        """Loads all embeddings from DB into memory."""
+        self.in_memory_index = self.index_repo.get_all_embeddings()
+        print(f"Loaded {len(self.in_memory_index)} notes into memory index.")
 
     def build_index(self, target_directory: str):
-        """Scans the target directory and executes embeddings for all notes."""
-        if self._load_index():
-            return
-
-        print(f"Building index from {target_directory}...")
+        """Incrementally scans the target directory and updates embeddings."""
+        print(f"Scanning {target_directory} for changes...")
         paths = self.repo.list_notes(target_directory)
+        
+        updates = 0
         for path in tqdm(paths, desc="Indexing Zettelkasten"):
             try:
-                note = self.repo.read_note(path)
-                embedding = self.embedder.embed(note.content)
-                self.index.append((note, embedding))
+                # Check timestamps
+                mtime = os.path.getmtime(path)
+                cached_mtime = self.index_repo.get_last_modified(path)
+                
+                if cached_mtime is None or mtime > cached_mtime:
+                    # New or Modified
+                    note = self.repo.read_note(path)
+                    embedding = self.embedder.embed(note.content)
+                    self.index_repo.upsert_note(note, embedding, mtime)
+                    updates += 1
             except Exception as e:
                 print(f"Error indexing {path}: {e}")
         
-        self._save_index()
-        print(f"Index built with {len(self.index)} notes.")
+        if updates > 0:
+            print(f"Updated index with {updates} changes.")
+            self._refresh_memory_index()
+        else:
+            print("Index is up to date.")
 
     def find_best_match(self, source_embedding: List[float]) -> Tuple[Note, float]:
         """Finds the closest note in the index using Cosine Similarity."""
-        if not self.index:
+        if not self.in_memory_index:
             return None, 0.0
 
-        target_embeddings = np.array([item[1] for item in self.index])
+        target_embeddings = np.array([item[1] for item in self.in_memory_index])
         source_vec = np.array(source_embedding)
         
-        # Cosine Similarity: (A . B) / (||A|| * ||B||)
-        # BGE-M3 embeddings are normalized, so we just dot product if source is also normalized.
-        # But let's be safe and do full calculation or assume embedder normalizes.
-        # LocalEmbedder does normalize=True.
-        
+        # Cosine Similarity
         scores = np.dot(target_embeddings, source_vec)
         best_idx = np.argmax(scores)
         best_score = scores[best_idx]
         
-        return self.index[best_idx][0], float(best_score)
+        best_path = self.in_memory_index[best_idx][0]
+        # We need to load the actual note content to return a Note object
+        # Since Note object is not stored fully in DB (only content hash?), 
+        # we read from FS.
+        # Although our 'process_directory' needs the note content for merging.
+        best_note = self.repo.read_note(best_path)
+        
+        return best_note, float(best_score)
 
     def process_directory(self, source_directory: str):
         """Main workflow: Iterate source, find match, merge/copy."""
         source_paths = self.repo.list_notes(source_directory)
         
         for path in tqdm(source_paths, desc="Processing New Notes"):
-            # print(f"Processing candidate: {path}") # tqdm handles logging better
-            # try:
-            source_note = self.repo.read_note(path)
-            source_emb = self.embedder.embed(source_note.content)
-            
-            match_note, score = self.find_best_match(source_emb)
-            
-            if match_note:
-                print(f"  Best candidate: {os.path.basename(match_note.path)} (Score: {score:.4f})")
-            
-            if match_note and score >= self.threshold:
-                self._merge_notes(source_note, match_note, score)
-            else:
-                self._copy_note(source_note)
-            # except Exception as e:
-            #     print(f"Error processing {path}: {e}")
+            try:
+                source_note = self.repo.read_note(path)
+                source_emb = self.embedder.embed(source_note.content)
+                
+                match_note, score = self.find_best_match(source_emb)
+                
+                if match_note:
+                    print(f"  Best candidate: {os.path.basename(match_note.path)} (Score: {score:.4f})")
+                
+                if match_note and score >= self.threshold:
+                    self._merge_notes(source_note, match_note, score)
+                else:
+                    self._copy_note(source_note)
+            except Exception as e:
+                  print(f"Error processing {path}: {e}")
 
     def _merge_notes(self, source: Note, target: Note, score: float):
         print(f"  [MERGE] Found match ({score:.2f}) -> {target.path}")
@@ -125,42 +121,43 @@ Rules:
 
 --- MERGED NOTE ---
 """
-        merged_content = self.llm.generate(prompt)
-        
-        # Append source link for traceability
-        source_name = os.path.splitext(os.path.basename(source.path))[0]
-        merged_content += f"\n\n---\n**Merged Source:** [[{source_name}]]"
-        
-        # Update Target
-        target.content = merged_content
-        self.repo.write_note(target)
-        self.repo.archive_note(source.path)
-        
-        # Live Index Update: Re-embed the updated target note
-        new_embedding = self.embedder.embed(target.content)
-        
-        # Find and replace the old entry in the index
-        # We search by path, assuming path is unique key
-        for i, (n, _) in enumerate(self.index):
-            if n.path == target.path:
-                self.index[i] = (target, new_embedding)
-                break
-        
-        # Persist changes
-        self._save_index()
+        try:
+            merged_content = self.llm.generate(prompt)
+            
+            # Append source link for traceability
+            source_name = os.path.splitext(os.path.basename(source.path))[0]
+            merged_content += f"\n\n---\n**Merged Source:** [[{source_name}]]"
+            
+            # Update Target
+            target.content = merged_content
+            self.repo.write_note(target)
+            
+            # Archive Source
+            self.repo.archive_note(source.path)
+            
+            # Live Index Update
+            new_embedding = self.embedder.embed(target.content)
+            mtime = time.time() # Approximation, or read from fs
+            self.index_repo.upsert_note(target, new_embedding, mtime)
+            
+            # Refresh memory (Partial update optimization possible, but full refresh safer for now or just patch memory)
+            # Patching memory for speed:
+            for i, (p, _) in enumerate(self.in_memory_index):
+                if p == target.path:
+                    self.in_memory_index[i] = (target.path, new_embedding)
+                    break
+        except Exception as e:
+            print(f"Merge failed: {e}")
 
     def _copy_note(self, source: Note):
         print(f"  [NEW] No match found. Importing.")
         # Logic to determine where to save it in Zettelkasten
-        # Simplified: Just write to Zettelkasten/Imported/{subfolders}/{filename}
         new_path = source.path.replace("Inbox", "Zettelkasten/Imported")
         new_note = Note(path=new_path, content=source.content)
         self.repo.write_note(new_note)
         self.repo.archive_note(source.path)
         
-        # Live Index Update: Add new note to index
+        # Live Index Update
         new_embedding = self.embedder.embed(new_note.content)
-        self.index.append((new_note, new_embedding))
-        
-        # Persist changes
-        self._save_index()
+        self.index_repo.upsert_note(new_note, new_embedding, time.time())
+        self.in_memory_index.append((new_path, new_embedding))
