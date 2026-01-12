@@ -36,18 +36,29 @@ class MarkdownFileRepository(INoteRepository):
         # Robustly move out of Inbox
         # We assume the path contains "Inbox"
         if "Inbox" in path:
-            # Split at "Inbox"
-            # /path/to/upsc/Inbox/Sub/file.md -> /path/to/upsc/
-            base_root = path.split("Inbox")[0]
-            archive_root = os.path.join(base_root, "Processed_Archive")
+            try:
+                # Find the 'Inbox' segment and get everything after it
+                parts = path.split(os.sep)
+                if "Inbox" in parts:
+                    inbox_index = parts.index("Inbox")
+                    relative_path = os.sep.join(parts[inbox_index + 1:])
+                    base_root = os.sep.join(parts[:inbox_index])
+                    archive_root = os.path.join(base_root, "Processed_Archive")
+                    dest = os.path.join(archive_root, relative_path)
+                else:
+                    # Fallback if "Inbox" is part of a string but not a folder segment
+                    base_root = path.split("Inbox")[0]
+                    archive_root = os.path.join(base_root, "Processed_Archive")
+                    dest = os.path.join(archive_root, os.path.basename(path))
+            except ValueError:
+                base_root = os.path.dirname(os.path.dirname(path))
+                archive_root = os.path.join(base_root, "Processed_Archive")
+                dest = os.path.join(archive_root, os.path.basename(path))
         else:
             # Fallback for weird paths
             archive_root = os.path.join(os.path.dirname(os.path.dirname(path)), "Processed_Archive")
+            dest = os.path.join(archive_root, os.path.basename(path))
 
-        # Preserve filename
-        filename = os.path.basename(path)
-        dest = os.path.join(archive_root, filename)
-        
         print(f"Archiving to {dest}")
-        os.makedirs(archive_root, exist_ok=True)
+        os.makedirs(os.path.dirname(dest), exist_ok=True)
         shutil.move(path, dest)

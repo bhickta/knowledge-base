@@ -129,7 +129,11 @@ class DeduplicationService:
                     elif score >= 0.70: # Medium Confidence -> Ask LLM
                         to_verify.append(src)
                     else:
-                        self._import_note(src)
+                        # 0.60 to 0.70: Related but unlikely same -> Auto Link
+                        # Previously imported as new note with NO link. 
+                        # Now we create a new note AND link it to the target.
+                        print(f"  [AUTO-LINK] '{os.path.basename(src.path)}' -> '{os.path.basename(target.path)}'")
+                        self._link_note(src, target, dry_run=dry_run)
                 
                 # Handle Must Merges (Auto)
                 if must_merge:
