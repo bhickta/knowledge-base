@@ -60,7 +60,7 @@ class DeduplicationService:
         # We can construct a Note from the result
         return Note(path=path, content=content), score
 
-    def process_directory(self, source_directory: str):
+    def process_directory(self, source_directory: str, dry_run: bool = False):
         """
         Main workflow: 
         1. Scan all candidates.
@@ -100,7 +100,7 @@ class DeduplicationService:
         if to_import:
             print(f"Importing {len(to_import)} new notes...")
             for note in tqdm(to_import, desc="Importing"):
-                self._import_note(note)
+                self._import_note(note, dry_run=dry_run)
 
         # B. Handle Merges and Links (Batched by Target)
         total_batches = len(merge_plan)
@@ -124,18 +124,16 @@ class DeduplicationService:
                 
                 # Handle Must Merges (Auto)
                 if must_merge:
-                    self._batch_merge_notes(target, must_merge)
-                    time.sleep(2)
+                    self._batch_merge_notes(target, must_merge, dry_run=dry_run)
                 
                 # Handle Verification (Merge vs Link)
                 for src in to_verify:
                     decision = self._classify_match(src, target)
                     if decision == "MERGE":
-                        self._batch_merge_notes(target, [src])
-                        time.sleep(2)
+                        self._batch_merge_notes(target, [src], dry_run=dry_run)
                     else:
                         print(f"  [LINK] '{os.path.basename(src.path)}' -> '{os.path.basename(target.path)}'")
-                        self._link_note(src, target)
+                        self._link_note(src, target, dry_run=dry_run)
 
     def _classify_match(self, source: Note, target: Note) -> str:
         """Asks LLM if two notes are the SAME concept (Merge) or just RELATED (Link)."""
@@ -162,7 +160,7 @@ Decision:"""
             print(f"Classification failed: {e}")
             return "LINK"
 
-    def _link_note(self, source: Note, target: Note):
+    def _link_note(self, source: Note, target: Note, dry_run: bool = False):
         """Creates the source note as new but adds bidirectional links."""
         base_name = os.path.basename(source.path)
         new_path = os.path.join(os.path.dirname(target.path), base_name)
@@ -177,17 +175,25 @@ Decision:"""
         # 1. Update Source with link to Target
         source.content = self._append_related_link(source.content, target_name)
         new_note = Note(path=new_path, content=source.content)
-        self.repo.write_note(new_note)
-        self.repo.archive_note(source.path)
+
+        if dry_run:
+            print(f"  [DRY RUN] Would write new note: {new_note.path}")
+        else:
+            self.repo.write_note(new_note)
+            self.repo.archive_note(source.path)
         
         # 2. Update Target with link to Source
         target.content = self._append_related_link(target.content, source_name)
-        self.repo.write_note(target)
         
-        # Live Index Updates
-        for n in [new_note, target]:
-            emb = self.embedder.embed(n.content)
-            self.index_store.upsert_note(n.path, n.content, emb, time.time())
+        if dry_run:
+            print(f"  [DRY RUN] Would update target note: {target.path}")
+        else:
+            self.repo.write_note(target)
+            
+            # Live Index Updates
+            for n in [new_note, target]:
+                emb = self.embedder.embed(n.content)
+                self.index_store.upsert_note(n.path, n.content, emb, time.time())
 
     def _append_related_link(self, content: str, link_name: str) -> str:
         """Helper to append a WikiLink to a consolidated 'Related' section."""
@@ -212,21 +218,29 @@ Decision:"""
         
         return clean_content.rstrip() + f"\n\n---\n**Related:** {links_str}"
 
-    def _import_note(self, source: Note):
+    def _import_note(self, source: Note, dry_run: bool = False):
         """Imports a completely new note."""
         new_path = source.path.replace("Inbox", "Zettelkasten/Imported")
         new_note = Note(path=new_path, content=source.content)
-        self.repo.write_note(new_note)
-        self.repo.archive_note(source.path)
         
-        new_embedding = self.embedder.embed(new_note.content)
-        self.index_store.upsert_note(new_note.path, new_note.content, new_embedding, time.time())
+        if dry_run:
+            print(f"  [DRY RUN] Would import note to: {new_path}")
+        else:
+            self.repo.write_note(new_note)
+            self.repo.archive_note(source.path)
+            
+            new_embedding = self.embedder.embed(new_note.content)
+            self.index_store.upsert_note(new_note.path, new_note.content, new_embedding, time.time())
 
-    def _batch_merge_notes(self, target: Note, sources: List[Note]):
+    def _batch_merge_notes(self, target: Note, sources: List[Note], dry_run: bool = False):
         """Merges multiple source notes into one target note in a single LLM call."""
         
         source_names = [os.path.splitext(os.path.basename(s.path))[0] for s in sources]
         print(f"  [MERGE] {len(sources)} notes -> {os.path.basename(target.path)} ({', '.join(source_names)})")
+
+        if dry_run:
+            print(f"  [DRY RUN] Would merge {len(sources)} sources into {target.path}")
+            return
 
         # Construct Prompt for Multiple Sources
         sources_text = ""
@@ -321,3 +335,27 @@ Rules:
             
         except Exception as e:
             print(f"Batch merge failed for {target.path}: {e}")
+
+
+def create_service(use_local_llm: bool = False) -> DeduplicationService:
+    """Factory function to create DeduplicationService with configured providers."""
+    from src.infrastructure.embedding.local_embedder import LocalEmbeddingProvider
+    from src.infrastructure.storage.fs_repo import MarkdownFileRepository
+    
+    provider_type = os.getenv("LLM_PROVIDER", "gemini").lower()
+    
+    if use_local_llm or provider_type == "ollama":
+        from src.infrastructure.llm.ollama_provider import OllamaGemmaProvider
+        llm = OllamaGemmaProvider(model_name="gemma3:12b")
+        print("Using Local LLM: Ollama (Gemma 3)")
+    else:
+        from src.infrastructure.llm.gemini_provider import GeminiFlashProvider
+        model_name = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
+        llm = GeminiFlashProvider(model_name=model_name)
+        print(f"Using Cloud LLM: {model_name}")
+    
+    print("Loading Embedding Model (BAAI/bge-m3)...")
+    embedder = LocalEmbeddingProvider(model_name="BAAI/bge-m3")
+    repo = MarkdownFileRepository()
+    
+    return DeduplicationService(llm=llm, embedder=embedder, repo=repo)

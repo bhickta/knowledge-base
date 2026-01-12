@@ -1,63 +1,93 @@
+#!/usr/bin/env python3
+import argparse
 import sys
 import os
+from pathlib import Path
 from dotenv import load_dotenv
 
-# Load environment variables from .env file
-load_dotenv()
+# Ensure imports work from knowledge_agent directory
+SCRIPT_DIR = Path(__file__).parent
+sys.path.insert(0, str(SCRIPT_DIR))
+load_dotenv(SCRIPT_DIR / ".env")
 
-# Ensure knowledge_agent is in path
-sys.path.append(os.path.dirname(os.path.abspath(__file__)))
-
-from src.infrastructure.llm.ollama_provider import OllamaGemmaProvider
-from src.infrastructure.llm.gemini_provider import GeminiFlashProvider
-from src.infrastructure.embedding.local_embedder import LocalEmbeddingProvider
-from src.infrastructure.storage.fs_repo import MarkdownFileRepository
-from src.core.services.dedup_service import DeduplicationService
+from src.core.services.dedup_service import create_service
 
 def main():
-    print("Initializing Knowledge Agent...")
-    
-    # 1. Setup Infrastructure
-    # Choose Provider based on Config
-    provider_type = os.getenv("LLM_PROVIDER", "ollama").lower()
-    
-    if provider_type == "gemini":
-        model_name = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
-        print(f"Using Cloud Provider: {model_name}")
-        llm = GeminiFlashProvider(model_name=model_name) # Requires GEMINI_API_KEY env var
-    else:
-        print("Using Local Provider: Ollama (Gemma 3)")
-        llm = OllamaGemmaProvider(model_name="gemma3:12b")
-    
-    # Check if BGE-M3 is ready
-    print("Loading Embedding Model (BAAI/bge-m3)...")
-    embedder = LocalEmbeddingProvider(model_name="BAAI/bge-m3")
-    
-    repo = MarkdownFileRepository()
-    
-    # 2. Setup Service
-    service = DeduplicationService(
-        llm=llm,
-        embedder=embedder,
-        repo=repo,
-        threshold=0.65
+    parser = argparse.ArgumentParser(
+        description="Knowledge Agent - Deduplicate and Merge Notes",
+        formatter_class=argparse.RawDescriptionHelpFormatter
     )
     
-    # 3. Execution
-    # Configurable via Environment Variables
-    default_zettel = "/home/bhickta/development/upsc/Zettelkasten/DD Basu Polity"
-    default_inbox = "/home/bhickta/development/upsc/Inbox"
+    parser.add_argument(
+        "--directory", "-d",
+        type=str,
+        help="Inbox directory to process (PROCESSED_DIR)"
+    )
     
-    ZETTELKASTEN_DIR = os.getenv("ZETTELKASTEN_DIR", default_zettel)
-    PROCESSED_DIR = os.getenv("PROCESSED_DIR", default_inbox)
+    parser.add_argument(
+        "--zettelkasten", "-z",
+        type=str,
+        help="Zettelkasten directory (for index/duplicates)"
+    )
     
-    # Step A: Build Index
-    service.build_index(ZETTELKASTEN_DIR)
+    parser.add_argument(
+        "--threshold", "-t",
+        type=float,
+        default=0.65,
+        help="Similarity threshold (default: 0.65)"
+    )
     
-    # Step B: Process
-    service.process_directory(PROCESSED_DIR)
+    parser.add_argument(
+        "--local-llm",
+        action="store_true",
+        help="Use local Ollama instead of Gemini"
+    )
     
-    print("Deduplication complete.")
+    parser.add_argument(
+        "--rebuild-index",
+        action="store_true",
+        help="Rebuild embedding index before processing"
+    )
+    
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Show planned merges without modifying files"
+    )
+    
+    args = parser.parse_args()
+    
+    # Defaults
+    default_zettel = os.getenv("ZETTELKASTEN_DIR", "/home/bhickta/development/upsc/Zettelkasten/DD Basu Polity")
+    default_inbox = os.getenv("PROCESSED_DIR", "/home/bhickta/development/upsc/Inbox")
+    
+    zettel_dir = os.path.abspath(args.zettelkasten or default_zettel)
+    inbox_dir = os.path.abspath(args.directory or default_inbox)
+    
+    print("=" * 60)
+    print("🧠 Knowledge Agent - Deduplication & Merge")
+    print("=" * 60)
+    print(f"Inbox:        {inbox_dir}")
+    print(f"Zettelkasten: {zettel_dir}")
+    print(f"Provider:     {'Local (Ollama)' if args.local_llm else 'Cloud (Gemini)'}")
+    print("=" * 60)
+    
+    # Initialize Service
+    service = create_service(use_local_llm=args.local_llm)
+    service.threshold = args.threshold
+    
+    # Step A: Build/Update Index
+    print(f"\n📊 Checking index for: {zettel_dir}")
+    service.build_index(zettel_dir)
+    
+    # Step B: Process Inbox
+    print(f"\n📥 Processing Inbox: {inbox_dir}")
+    if args.dry_run:
+        print("   [DRY RUN MODE ENABLED]")
+        
+    service.process_directory(inbox_dir, dry_run=args.dry_run)
+    
+    print("\n✅ Deduplication complete.")
 
 if __name__ == "__main__":
     main()
