@@ -13,12 +13,21 @@ class DeduplicationService:
         embedder: IEmbeddingProvider,
         repo: INoteRepository,
         threshold: float = 0.60,
-        db_path: str = "chroma_db"
+        db_path: str = None
     ):
         self.llm = llm
         self.embedder = embedder
         self.repo = repo
         self.threshold = threshold
+        
+        # Ensure db_path is absolute and inside knowledge_agent
+        if db_path is None or db_path == "chroma_db":
+             # Resolve path relative to this file: src/core/services -> knowledge_agent
+            module_dir = os.path.dirname(os.path.abspath(__file__))
+            # Up 3 levels: services -> core -> src -> knowledge_agent
+            knowledge_agent_dir = os.path.dirname(os.path.dirname(os.path.dirname(module_dir)))
+            db_path = os.path.join(knowledge_agent_dir, "chroma_db")
+            
         self.index_store = ChromaStore(persist_path=db_path)
 
     def build_index(self, target_directory: str):
